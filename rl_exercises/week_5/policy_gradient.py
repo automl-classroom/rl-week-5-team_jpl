@@ -73,6 +73,10 @@ class Policy(nn.Module):
         # self.fc1 should map from self.state_dim to hidden_size
         # self.fc2 should map from hidden_size to self.n_actions
 
+        # Create linear layers with correct dims
+        self.fc1 = nn.Linear(self.state_dim, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, int(self.n_actions))
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Compute action probabilities for given state(s).
@@ -90,7 +94,23 @@ class Policy(nn.Module):
         # TODO: Apply fc1 followed by ReLU (Flatten input if needed)
         # TODO: Apply fc2 to get logits
         # TODO: Return softmax over logits along the last dimension
-        pass
+
+        # Neural_net with self.fc1, self.fc2, relu and softmax
+        neural_net = nn.Sequential(
+            self.fc1,
+            nn.ReLU(),
+            self.fc2,
+            nn.Softmax(dim=-1), # softmax along last dim
+        )
+
+        # (state_dim,) -> (1, shape_dim)
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+
+        # comp forward path
+        logits = neural_net(x)
+
+        return logits
 
 
 class REINFORCEAgent(AbstractAgent):
@@ -164,7 +184,36 @@ class REINFORCEAgent(AbstractAgent):
         # TODO: Pass state through the policy network to get action probabilities
         # If evaluate is True, return the action with highest probability
         # Otherwise, sample from the action distribution and return the log-probability as a key in the dictionary (Hint: use torch.distributions.Categorical)
-        return 0, {}  # Placeholder return value
+        # Used a little help from ChatGPT to debug my solution
+
+        # Convert np array to torch tensor
+        state = torch.tensor(state, dtype=torch.float)
+
+        # comp action probs from forward
+        probs = self.policy.forward(state)
+
+        # if evaluate return class with highest prob
+        if evaluate:
+            action = int(torch.argmax(probs))
+
+            # leave dict empty
+            return action, {}
+
+        # else sample from action prob distribution
+        else:
+            # create dist
+            distribution = torch.distributions.Categorical(probs)
+
+            # sample action from dist
+            sampled_action = distribution.sample()
+
+            # make sure action is int and not tensor
+            action = int(sampled_action.item())
+
+            # convert sampled action into log_prob
+            log_prob = distribution.log_prob(sampled_action)
+
+            return action, {"log_prob": log_prob}
 
     def compute_returns(self, rewards: List[float]) -> torch.Tensor:
         """
@@ -182,11 +231,21 @@ class REINFORCEAgent(AbstractAgent):
         """
 
         # TODO: Initialize running return R = 0
+        returns = []
+        R = 0
+
         # TODO: Iterate over rewards and compute the return-to-go:
         #       - Update R = r + gamma * R
         #       - Insert R at the beginning of the returns list
+
+        # reverse list to comp "backwards", mainly to address R_(t+1)
+        for reward in reversed(rewards):
+            R = reward + self.gamma * R # R_t = r_t + gamma * R_(t+1)
+            returns.insert(0, R)
+
         # TODO: Convert the list of returns to a torch.Tensor and return
-        pass
+
+        return torch.tensor(returns)
 
     def update_agent(
         self,
@@ -208,15 +267,17 @@ class REINFORCEAgent(AbstractAgent):
             Scalar loss value after update.
         """
         # unpack log_probs & rewards
-        log_probs = [t[5]["log_prob"] for t in training_batch]
-        rewards = [t[2] for t in training_batch]
+        log_probs = [t[5]["log_prob"] for t in training_batch] # info
+        rewards = [t[2] for t in training_batch] # reward
 
         # compute discounted returns
         returns_t = self.compute_returns(rewards)
 
         # TODO: Normalize returns with mean and standard deviation,
-        # and add 1e-8 to the denominator to avoid division by zero
-        norm_returns = returns_t
+        # and add 1e-8 to the denominator to avoid division by zero => (x - mean) / std
+        norm_returns = ((returns_t - torch.mean(returns_t))/
+                        (torch.std(returns_t, unbiased=False) + 1e-8))
+        # norm_returns = torch.normalize(returns_t)
 
         lp_tensor = torch.stack(log_probs)
         loss = -torch.sum(lp_tensor * norm_returns)
@@ -280,11 +341,46 @@ class REINFORCEAgent(AbstractAgent):
         self.policy.eval()
         returns: List[float] = []  # noqa: F841
         # TODO: rollout num_episodes in eval_env and aggregate undiscounted returns across episodes
+        # Used help from ChatGPT to set up structure of code and to debug error if reset_result is tuple
+
+        # Don't comp gradient during eval
+        with torch.no_grad():
+
+            # iterate over all episodes
+            for _ in range(num_episodes):
+                # reset env
+                reset_result = eval_env.reset()
+                # take first element of reset-result as state if reset_result is tuple
+                if isinstance(reset_result, tuple):
+                    state = reset_result[0]
+                else:
+                    state = reset_result
+                # Set done and total_reward to initialized values
+                done = False
+                total_reward = 0.0
+
+                # Comp total rewards until episode is done (max state is reached)
+                while not done:
+                    action, _ = self.predict_action(state, evaluate=True) # eval = True
+                    # comp next state and reward
+                    next_state, reward, done, truncated, _ = eval_env.step(action)
+                    # add reward
+                    total_reward += reward
+                    # set upcoming state to next state for next iteration
+                    state = next_state
+
+                # append total reward to returns list
+                returns.append(total_reward)
 
         self.policy.train()  # Set back to training mode
 
         # TODO: Return the mean and std of the returns across episodes
-        return 0.0, 0.0
+
+        # comp mean and std of returns
+        mean_return = float(np.mean(returns))
+        std_return = float(np.std(returns))
+
+        return mean_return, std_return
 
     def train(
         self,
